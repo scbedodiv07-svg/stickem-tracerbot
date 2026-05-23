@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stick 'Em CV Line Tracker & Sensor Logger</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; background: #9ca3af; color: #111827; margin: 0; transition: background 0.3s; }
+    body.connected { background: #20a7d9; }
+    body.running { background: #19b36a; }
+    body.error-bg { background: #ef4444; color: white; }
+
+    .app-container { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+    header { text-align: center; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    h1 { margin: 0; font-size: 24px; color: #1f2937; }
+    
+    /* Gray-out mechanism when board isn't connected */
+    .not-connected-overlay { opacity: 0.35; pointer-events: none; user-select: none; transition: opacity 0.3s; }
+    .connected-active { opacity: 1 !important; pointer-events: auto !important; user-select: auto !important; }
+
+    .grid-layout { display: grid; grid-template-columns: 1fr; gap: 20px; }
+    @media (min-width: 768px) { .grid-layout { grid-template-columns: 1fr 1fr; } }
+
+    .card { background: rgba(255, 255, 255, 0.95); border-radius: 12px; padding: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 12px; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 10px; }
+    
+    button { font-size: 16px; padding: 12px 20px; border-radius: 8px; border: 0; font-weight: bold; cursor: pointer; transition: transform 0.1s; }
+    button:active { transform: scale(0.97); }
+    .primary { background: #2563eb; color: white; }
+    .danger { background: #ef4444; color: white; }
+    .success { background: #16a34a; color: white; }
+    .secondary { background: #4b5563; color: white; }
+    
+    .status-bar { font-size: 14px; font-weight: 600; color: #374151; padding: 6px; background: #e5e7eb; border-radius: 6px; text-align: center; }
+    .arrow-display { font-size: 40px; text-align: center; margin: 10px 0; font-weight: 800; display: flex; justify-content: space-around; background: #f3f4f6; padding: 10px; border-radius: 8px; border: 1px solid #d1d5db; }
+    .arrow-box { display: flex; flex-direction: column; align-items: center; font-size: 14px; color: #4b5563; }
+    .arrow-box span { font-size: 48px; margin-top: 4px; }
+
+    .table-wrapper { max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+    th { background: #f3f4f6; padding: 8px; position: sticky; top: 0; font-weight: 700; border-bottom: 2px solid #e5e7eb; }
+    td { padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
+    tr:nth-child(even) { background: #f9fafb; }
+
+    #canvasHolder, #graphHolder { width: 100%; display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
+    
+    /* Input tuning sliders */
+    .slider-group { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+    .slider-row { display: grid; grid-template-columns: 120px 1fr 40px; align-items: center; gap: 10px; }
+  </style>
+</head>
+<body>
+
+  <div class="app-container">
+    <header>
+      <h1>Stick 'Em Robot CV Line Tracker</h1>
+      <div id="status" class="status-bar">Status: Disconnected</div>
+    </header>
+
+    <div class="card">
+      <div class="btn-row">
+        <button id="connect" class="primary">Connect Robot Board</button>
+        <button id="toggleMode" class="secondary">Mode: Black Line / Light Floor</button>
+        <button id="startTracker" class="success not-connected-overlay">Start Tracking</button>
+        <button id="stop" class="danger">Emergency Stop</button>
+      </div>
+    </div>
+
+    <div class="grid-layout">
+      
+      <div class="card not-connected-overlay" id="cvCard">
+        <h3>Live Back Camera & Tracking Output</h3>
+        <div id="canvasHolder"></div>
+        
+        <div class="arrow-display">
+          <div class="arrow-box">
+            Current Action
+            <span id="currentArrow">⬇️</span>
+          </div>
+          <div class="arrow-box">
+            Predicted Path
+            <span id="predictArrow">⬇️</span>
+          </div>
+        </div>
+
+        <div class="slider-group">
+          <h4>Sensitivity & Speed Tuning</h4>
+          <div class="slider-row">
+            <label>Base Speed:</label>
+            <input type="range" id="baseSpeed" min="0" max="200" value="100" />
+            <span id="baseSpeedVal">100</span>
+          </div>
+          <div class="slider-row">
+            <label>Steer Gain:</label>
+            <input type="range" id="steerGain" min="0.1" max="3.0" step="0.1" value="1.2" />
+            <span id="steerGainVal">1.2</span>
+          </div>
+          <div class="slider-row">
+            <label>CV Threshold:</label>
+            <input type="range" id="threshold" min="0" max="255" value="100" />
+            <span id="thresholdVal">100</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card not-connected-overlay" id="sensorCard">
+        <h3>Live Accelerometer Graph</h3>
+        <div id="graphHolder"></div>
+
+        <h3>Data Logs</h3>
+        <div class="table-wrapper">
+          <table id="dataLogsTable">
+            <thead>
+              <tr>
+                <th>Run Time (s)</th>
+                <th>Acc X (m/s²)</th>
+                <th>Acc Y (m/s²)</th>
+                <th>Acc Z (m/s²)</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script type="module">
+    // Hardware Protocol Specifications
+    const SERVICE_UUID = 0xFFE0;
+    const TX_CHAR_UUID = 0xFFE1;
+
+    let bleChar   = null;
+    let connected = false;
+    let pending   = null;   // Active command buffer
+    let lastSent  = null;   // Write deduplication cache
+    let writing   = false;  // GATT Write Guard concurrency block
+
+    // UI elements state
+    let isTrackingActive = false;
+    let lineMode = "blackOnLight"; // Alternates with "whiteOnDark"
+    
+    // Telemetry storage variables
+    let accX = 0, accY = 0, accZ = 0;
+    let runStartTime = 0;
+    let telemetryData = [];
+
+    // Navigation state monitoring variables
+    let currentDirection = "straight"; 
+    let predictedDirection = "straight";
+
+    // Grab interface hooks
+    const statusEl = document.getElementById('status');
+    const connectBtn = document.getElementById('connect');
+    const startBtn = document.getElementById('startTracker');
+    const stopBtn = document.getElementById('stop');
+    const modeBtn = document.getElementById('toggleMode');
+    const tableBody = document.getElementById('tableBody');
+
+    // UI Element Binding
+    connectBtn.onclick = connect;
+    stopBtn.onclick = emergencyStop;
+    startBtn.onclick = toggleTracking;
+    modeBtn.onclick = toggleTrackingMode;
+
+    // Direct interface value listeners
+    setupSliderListener('baseSpeed', 'baseSpeedVal');
+    setupSliderListener('steerGain', 'steerGainVal');
+    setupSliderListener('threshold', 'thresholdVal');
+
+    function setupSliderListener(id, valId) {
+      const slider = document.getElementById(id);
+      const display = document.getElementById(valId);
+      slider.oninput = () => { display.textContent = slider.value; };
+    }
+
+    // Connect to Stick 'Em BLE Controller
+    async function connect() {
+      try {
+        statusEl.textContent = 'Scanning for Stick \'Em Board...';
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: '⠀' }], // Braille Prefix matching filter
+          optionalServices: [SERVICE_UUID],
+        });
+        
+        device.addEventListener('gattserverdisconnected', () => {
+          connected = false;
+          isTrackingActive = false;
+          statusEl.textContent = 'Disconnected';
+          document.body.className = 'error-bg';
+          toggleUIActivation(false);
+        });
+
+        const server  = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        bleChar = await service.getCharacteristic(TX_CHAR_UUID);
+        
+        connected = true;
+        statusEl.textContent = 'Connected to Board: ' + device.name;
+        document.body.className = 'connected';
+        toggleUIActivation(true);
+        startSendLoop();
+
+        // Enable accelerometer streaming on click context window
+        requestMotionPermissions();
+      } catch (e) {
+        statusEl.textContent = 'Connection failed: ' + e.message;
+        console.error(e);
+      }
+    }
+
+    function toggleUIActivation(isActive) {
+      const cvCard = document.getElementById('cvCard');
+      const sensorCard = document.getElementById('sensorCard');
+      if (isActive) {
+        startBtn.classList.add('connected-active');
+        cvCard.classList.add('connected-active');
+        sensorCard.classList.add('connected-active');
+      } else {
+        startBtn.classList.remove('connected-active');
+        cvCard.classList.remove('connected-active');
+        sensorCard.classList.remove('connected-active');
+      }
+    }
+
+    function toggleTrackingMode() {
+      if (lineMode === "blackOnLight") {
+        lineMode = "whiteOnDark";
+        modeBtn.textContent = "Mode: White Line / Dark Floor";
+      } else {
+        lineMode = "blackOnLight";
+        modeBtn.textContent = "Mode: Black Line / Light Floor";
+      }
+    }
+
+    function toggleTracking() {
+      if (!connected) return;
+      isTrackingActive = !isTrackingActive;
+      if (isTrackingActive) {
+        startBtn.textContent = "Pause Tracking";
+        startBtn.className = "danger";
+        document.body.className = "running";
+        runStartTime = millis();
+        telemetryData = [];
+        tableBody.innerHTML = "";
+      } else {
+        startBtn.textContent = "Start Tracking";
+        startBtn.className = "success";
+        document.body.className = "connected";
+        window.sendServos(null, null); // Halt motion safely
+      }
+    }
+
+    function emergencyStop() {
+      isTrackingActive = false;
+      startBtn.textContent = "Start Tracking";
+      startBtn.className = "success";
+      if (connected) document.body.className = "connected";
+      else document.body.className = "";
+      window.stopAll();
+    }
+
+    // Hardware Interface Output Mappers
+    window.sendServos = function (m1, m2) {
+      const slots = [m1, m2, null, null, null, null, null, null].map(v =>
+        (v === null || v === undefined)
+          ? '-'
+          : Math.max(1000, Math.min(2000, Math.round(v)))
+      );
+      pending = `mv:${slots.join(':')},`;
+    };
+
+    window.stopAll = function () { pending = 'stopAll,'; };
+
+    async function sendRaw(cmd) {
+      if (!connected || !bleChar || writing) return;
+      writing = true;
+      try {
+        await bleChar.writeValue(new TextEncoder().encode(cmd));
+        lastSent = cmd;
+      } catch (e) {
+        console.warn('GATT write failed', e);
+      } finally {
+        writing = false;
+      }
+    }
+
+    function startSendLoop() {
+      setInterval(() => {
+        if (!connected || !pending || pending === lastSent || writing) return;
+        sendRaw(pending);
+      }, 25); // Run at exact ~40 Hz internal timing clock
+    }
+
+    // Native Device Sensors Streaming Handler
+    function requestMotionPermissions() {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              window.addEventListener('devicemotion', handleMotion);
+            }
+          })
+          .catch(console.error);
+      } else {
+        window.addEventListener('devicemotion', handleMotion);
+      }
+    }
+
+    function handleMotion(event) {
+      if (!event.accelerationIncludingGravity) return;
+      // Mirror direct sensor axes coordinate readouts
+      accX = event.accelerationIncludingGravity.x || 0;
+      accY = event.accelerationIncludingGravity.y || 0;
+      accZ = event.accelerationIncludingGravity.z || 0;
+    }
+
+    // Custom Lightweight CV Processing Pipeline with Inline UI Generation
+    const s = (p) => {
+      let capture;
+      let graphCanvas;
+      let lastLogTime = 0;
+
+      p.setup = () => {
+        let cvCanvas = p.createCanvas(320, 240);
+        cvCanvas.parent('canvasHolder');
+        
+        // Target structural back-facing camera configuration
+        let constraints = {
+          video: {
+            facingMode: "environment",
+            width: 320,
+            height: 240
+          },
+          audio: false
+        };
+        capture = p.createCapture(constraints);
+        capture.size(320, 240);
+        capture.hide();
+
+        // Separate Graphing Node
+        graphCanvas = p.createGraphics(320, 150);
+        graphCanvas.parent('graphHolder');
+        setupGraphSkeleton();
+      };
+
+      p.draw = () => {
+        p.background(0);
+        if (!capture.loadedmetadata) return;
+
+        // Render basic camera frame inside view window
+        p.image(capture, 0, 0, 320, 240);
+        capture.loadPixels();
+
+        if (capture.pixels.length === 0) return;
+
+        // Configuration Hooks
+        let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
+        let steerGain = parseFloat(document.getElementById('steerGain').value);
+        let userThreshold = parseInt(document.getElementById('threshold').value);
+
+        // Analyze Horizon Scanning Control Checkpoints
+        // Scan Line 1: Main Control Line (just in front of wheels, lower down)
+        let controlY = 180;
+        let controlData = scanLineROI(capture, controlY, userThreshold);
+
+        // Scan Line 2: Predictive Path Horizon (further up frame)
+        let predictiveY = 80;
+        let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
+
+        // Process Main Control metrics
+        if (controlData.lineDetected) {
+          // Compute direct heading metric variations
+          let frameCenter = p.width / 2;
+          let headingError = controlData.centroid - frameCenter;
+
+          // Paint visual feedback tags onto processing display layer
+          p.stroke(0, 255, 0); p.strokeWeight(2);
+          p.line(controlData.leftEdge, controlY, controlData.rightEdge, controlY);
+          p.fill(255, 0, 0); p.noStroke();
+          p.circle(controlData.centroid, controlY, 8);
+
+          // Categorize movement vectors
+          if (headingError < -15) currentDirection = "left";
+          else if (headingError > 15) currentDirection = "right";
+          else currentDirection = "straight";
+
+          // Calculate Steering Corrections dynamically using PID-proportional scaling
+          if (isTrackingActive) {
+            let steeringCorrection = headingError * steerGain;
+            
+            // Map Continuous Wheel Speeds around 1500 Neutral Axis 
+            // Left Wheel = Servo 1, Right Wheel = Servo 2
+            let leftMotor = 1500 + baseSpeed + steeringCorrection;
+            let rightMotor = 1500 - baseSpeed + steeringCorrection; // Counter-balanced rotation orientation
+
+            window.sendServos(leftMotor, rightMotor);
+          }
+        } else {
+          currentDirection = "straight";
+          if (isTrackingActive) window.sendServos(1500, 1500); // Fail-safe stop
+        }
+
+        // Process Predictor Analysis Node metrics
+        if (predictiveData.lineDetected) {
+          let frameCenter = p.width / 2;
+          let forwardDiff = predictiveData.centroid - frameCenter;
+
+          // Detect Intersections (Wide horizontal segments or multi-splits)
+          if (predictiveData.lineWidth > 120) {
+            predictedDirection = "straight"; 
+            p.fill(255, 255, 0); p.textSize(16); p.textAlign(p.CENTER);
+            p.text("💥 INTERSECTION DETECTED", p.width / 2, 50);
+          } else {
+            if (forwardDiff < -20) predictedDirection = "left";
+            else if (forwardDiff > 20) predictedDirection = "right";
+            else predictedDirection = "straight";
+          }
+
+          // Paint visualization indicators
+          p.stroke(0, 150, 255); p.strokeWeight(2);
+          p.line(predictiveData.leftEdge, predictiveY, predictiveData.rightEdge, predictiveY);
+          p.fill(0, 150, 255); p.noStroke();
+          p.circle(predictiveData.centroid, predictiveY, 6);
+        } else {
+          predictedDirection = "straight";
+        }
+
+        // Update view arrow boxes
+        updateNavigationArrows();
+
+        // Handle Log Storage Cadence
+        if (isTrackingActive) {
+          let currentTime = (p.millis() - runStartTime) / 1000;
+          if (p.millis() - lastLogTime > 250) { // Log 4 instances per second
+            logTelemetry(currentTime.toFixed(2), accX.toFixed(2), accY.toFixed(2), accZ.toFixed(2));
+            lastLogTime = p.millis();
+          }
+          renderGraph(currentTime);
+        }
+      };
+
+      // Lightweight Binary Image ROI Pixel-Row Scanner
+      function scanLineROI(img, scanY, thresh) {
+        let leftEdge = -1;
+        let rightEdge = -1;
+        
+        // Scan line components loop sequentially
+        for (let x = 0; x < p.width; x++) {
+          let index = (x + scanY * img.width) * 4;
+          let r = img.pixels[index];
+          let g = img.pixels[index+1];
+          let b = img.pixels[index+2];
+          let brightness = (r + g + b) / 3;
+
+          let isTargetPixel = false;
+          if (lineMode === "blackOnLight") {
+            isTargetPixel = (brightness < thresh); // Looking for dark values
+          } else {
+            isTargetPixel = (brightness > thresh); // Looking for bright values
+          }
+
+          if (isTargetPixel) {
+            if (leftEdge === -1) leftEdge = x;
+            rightEdge = x;
+          }
+        }
+
+        let lineDetected = (leftEdge !== -1 && rightEdge !== -1 && (rightEdge - leftEdge) > 4);
+        let lineWidth = rightEdge - leftEdge;
+        let centroid = Math.round((leftEdge + rightEdge) / 2);
+
+        return { lineDetected, leftEdge, rightEdge, lineWidth, centroid };
+      }
+
+      function updateNavigationArrows() {
+        const arrowMap = { "straight": "⬆️", "left": "⬅️", "right": "➡️" };
+        document.getElementById('currentArrow').textContent = arrowMap[currentDirection];
+        document.getElementById('predictArrow').textContent = arrowMap[predictedDirection];
+      }
+
+      function logTelemetry(t, x, y, z) {
+        telemetryData.push({ t: parseFloat(t), x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) });
+        if (telemetryData.length > 50) telemetryData.shift(); // Keep visual chart queue balanced
+
+        // Direct table element manipulation insertion
+        let row = tableBody.insertRow(0);
+        row.insertCell(0).innerText = t;
+        row.insertCell(1).innerText = x;
+        row.insertCell(2).innerText = y;
+        row.insertCell(3).innerText = z;
+
+        // Truncate structural logging table layout memory overhead
+        if (tableBody.rows.length > 30) {
+          tableBody.deleteRow(30);
+        }
+      }
+
+      function setupGraphSkeleton() {
+        graphCanvas.background(20);
+        graphCanvas.stroke(50);
+        graphCanvas.line(40, 0, 40, 130);
+        graphCanvas.line(40, 65, 320, 65); // Neutral sensor zero plane
+      }
+
+      function renderGraph(currentSec) {
+        graphCanvas.background(20);
+        setupGraphSkeleton();
+        
+        if (telemetryData.length < 2) return;
+
+        // Render line traces for each dimensional property array entry
+        for (let axis of ['x', 'y', 'z']) {
+          if (axis === 'x') graphCanvas.stroke(239, 68, 68);       // Red X
+          else if (axis === 'y') graphCanvas.stroke(34, 197, 94);   // Green Y
+          else graphCanvas.stroke(59, 130, 246);                    // Blue Z
+          
+          graphCanvas.noFill();
+          graphCanvas.strokeWeight(1.5);
+          graphCanvas.beginShape();
+          
+          for (let i = 0; i < telemetryData.length; i++) {
+            let d = telemetryData[i];
+            // Normalize graph mapping offsets across width
+            let targetX = p.map(i, 0, telemetryData.length - 1, 40, 310);
+            // Map acceleration range scale (-20 to +20 m/s^2) inside vertical box boundary
+            let targetY = p.map(d[axis], -20, 20, 130, 5);
+            graphCanvas.vertex(targetX, targetY);
+          }
+          graphCanvas.endShape();
+        }
+
+        // Overlay axis legend tracking text markers
+        graphCanvas.noStroke();
+        graphCanvas.fill(255);
+        graphCanvas.textSize(10);
+        graphCanvas.text("Acc Data Plot (Red:X, Green:Y, Blue:Z)", 45, 15);
+        graphCanvas.text("Time: " + currentSec.toFixed(1) + "s", 250, 15);
+      }
+    };
+
+    // Instantiate p5 Runtime Target Pipeline instance node
+    new p5(s);
+  </script>
+</body>
+</html>
