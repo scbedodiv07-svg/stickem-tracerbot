@@ -15,7 +15,6 @@
     header { text-align: center; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     h1 { margin: 0; font-size: 24px; color: #1f2937; }
     
-    /* Gray-out mechanism when board isn't connected */
     .not-connected-overlay { opacity: 0.35; pointer-events: none; user-select: none; transition: opacity 0.3s; }
     .connected-active { opacity: 1 !important; pointer-events: auto !important; user-select: auto !important; }
 
@@ -45,7 +44,6 @@
 
     #canvasHolder, #graphHolder { width: 100%; display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
     
-    /* Input tuning sliders */
     .slider-group { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
     .slider-row { display: grid; grid-template-columns: 120px 1fr 40px; align-items: center; gap: 10px; }
   </style>
@@ -68,20 +66,13 @@
     </div>
 
     <div class="grid-layout">
-      
       <div class="card not-connected-overlay" id="cvCard">
         <h3>Live Back Camera & Tracking Output</h3>
         <div id="canvasHolder"></div>
         
         <div class="arrow-display">
-          <div class="arrow-box">
-            Current Action
-            <span id="currentArrow">⬇️</span>
-          </div>
-          <div class="arrow-box">
-            Predicted Path
-            <span id="predictArrow">⬇️</span>
-          </div>
+          <div class="arrow-box">Current Action<span id="currentArrow">⬇️</span></div>
+          <div class="arrow-box">Predicted Path<span id="predictArrow">⬇️</span></div>
         </div>
 
         <div class="slider-group">
@@ -119,45 +110,37 @@
                 <th>Acc Z (m/s²)</th>
               </tr>
             </thead>
-            <tbody id="tableBody">
-              </tbody>
+            <tbody id="tableBody"></tbody>
           </table>
         </div>
       </div>
-
     </div>
   </div>
 
   <script type="module">
-    // Hardware Protocol Specifications
     const SERVICE_UUID = 0xFFE0;
     const TX_CHAR_UUID = 0xFFE1;
 
     let bleChar   = null;
     let connected = false;
-    let pending   = null;   // Active command buffer
-    let lastSent  = null;   // Write deduplication cache
-    let writing   = false;  // GATT Write Guard concurrency block
-    let sendTimer = null;   // Interval reference
+    let pending   = null;   
+    let lastSent  = null;   
+    let writing   = false;  // Firm single GATT write concurrency guard flag
+    let sendTimer = null;   
 
-    // UI elements state
     let isTrackingActive = false;
-    let lineMode = "blackOnLight"; // Alternating state toggle
+    let lineMode = "blackOnLight"; 
     
-    // Telemetry storage variables
     let accX = 0, accY = 0, accZ = 0;
     let runStartTime = 0;
     let telemetryData = [];
 
-    // Global variables calculated by CV loop, consumed by the 40Hz BLE loop
     let calculatedHeadingError = 0;
     let controlLineVisible = false;
 
-    // Navigation state monitoring variables
     let currentDirection = "straight"; 
     let predictedDirection = "straight";
 
-    // Grab interface hooks
     const statusEl = document.getElementById('status');
     const connectBtn = document.getElementById('connect');
     const startBtn = document.getElementById('startTracker');
@@ -165,13 +148,11 @@
     const modeBtn = document.getElementById('toggleMode');
     const tableBody = document.getElementById('tableBody');
 
-    // UI Element Binding
     connectBtn.onclick = connect;
     stopBtn.onclick = emergencyStop;
     startBtn.onclick = toggleTracking;
     modeBtn.onclick = toggleTrackingMode;
 
-    // Direct interface value listeners
     setupSliderListener('baseSpeed', 'baseSpeedVal');
     setupSliderListener('steerGain', 'steerGainVal');
     setupSliderListener('threshold', 'thresholdVal');
@@ -182,12 +163,11 @@
       slider.oninput = () => { display.textContent = slider.value; };
     }
 
-    // Connect to Stick 'Em BLE Controller
     async function connect() {
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], // Braille Prefix matching filter
+          filters: [{ namePrefix: '⠀' }], 
           optionalServices: [SERVICE_UUID],
         });
         
@@ -209,8 +189,6 @@
         document.body.className = 'connected';
         toggleUIActivation(true);
         startSendLoop();
-
-        // Enable accelerometer streaming on click context window
         requestMotionPermissions();
       } catch (e) {
         statusEl.textContent = 'Connection failed: ' + e.message;
@@ -256,7 +234,7 @@
         startBtn.textContent = "Start Tracking";
         startBtn.className = "success";
         document.body.className = "connected";
-        window.sendServos(null, null); // Halt motion safely
+        window.sendServos(1500, 1500); 
       }
     }
 
@@ -269,9 +247,9 @@
       window.stopAll();
     }
 
-    // Hardware Interface Output Mappers
+    // High Optimization: Construct minimal command length to eliminate packet slicing drops
     window.sendServos = function (m1, m2) {
-      const slots = [m1, m2, null, null, null, null, null, null].map(v =>
+      const slots = [m1, m2].map(v =>
         (v === null || v === undefined)
           ? '-'
           : Math.max(1000, Math.min(2000, Math.round(v)))
@@ -283,14 +261,14 @@
 
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
-      writing = true;
+      writing = true; // Engage hard lock
       try {
         await bleChar.writeValue(new TextEncoder().encode(cmd));
         lastSent = cmd;
       } catch (e) {
-        console.warn('GATT write failed', e);
+        console.warn('GATT write dropped/blocked', e);
       } finally {
-        writing = false;
+        writing = false; // Disengage lock immediately on completion
       }
     }
 
@@ -299,29 +277,25 @@
       sendTimer = setInterval(() => {
         if (!connected) return;
 
-        // Construct commands dynamically inside the 40Hz window instead of the 60Hz p5 draw loop
         if (isTrackingActive) {
           if (controlLineVisible) {
             let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
             let steerGain = parseFloat(document.getElementById('steerGain').value);
-            
-            // Proportional steering deflection
             let steeringCorrection = calculatedHeadingError * steerGain;
             
-            // Map continuous servo rotation bounds explicitly
-            // Forward bias is added natively here to guarantee your motors spin
             let leftMotor = 1500 + baseSpeed + steeringCorrection;
             let rightMotor = 1500 - baseSpeed + steeringCorrection;
 
             window.sendServos(leftMotor, rightMotor);
           } else {
-            window.sendServos(1500, 1500); // Stop moving if line is lost
+            window.sendServos(1500, 1500); 
           }
         }
 
+        // Strict validation layer
         if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 25); // Run at strict ~40 Hz internal hardware constraint
+      }, 30); // Eased down slightly to ~33Hz for maximum packet transfer safety
     }
 
     function stopSendLoop() {
@@ -331,7 +305,6 @@
       }
     }
 
-    // Native Device Sensors Streaming Handler
     function requestMotionPermissions() {
       if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission()
@@ -353,7 +326,6 @@
       accZ = event.accelerationIncludingGravity.z || 0;
     }
 
-    // Custom Lightweight CV Processing Pipeline
     const s = (p) => {
       let capture;
       let graphCanvas;
@@ -391,22 +363,18 @@
 
         let userThreshold = parseInt(document.getElementById('threshold').value);
 
-        // Scan Line 1: Tracking Checkpoint Zone
         let controlY = 180;
         let controlData = scanLineROI(capture, controlY, userThreshold);
 
-        // Scan Line 2: Predictive Path Horizon Checkpoint
         let predictiveY = 80;
         let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
 
-        // Save status vectors safely for the 40Hz BLE sender clock
         controlLineVisible = controlData.lineDetected;
 
         if (controlData.lineDetected) {
           let frameCenter = p.width / 2;
           calculatedHeadingError = controlData.centroid - frameCenter;
 
-          // Paint processing visualization overlay bounds
           p.stroke(0, 255, 0); p.strokeWeight(2);
           p.line(controlData.leftEdge, controlY, controlData.rightEdge, controlY);
           p.fill(255, 0, 0); p.noStroke();
@@ -420,7 +388,6 @@
           currentDirection = "straight";
         }
 
-        // Process Predictor Analysis
         if (predictiveData.lineDetected) {
           let frameCenter = p.width / 2;
           let forwardDiff = predictiveData.centroid - frameCenter;
@@ -445,7 +412,6 @@
 
         updateNavigationArrows();
 
-        // Handle Log Storage Cadence
         if (isTrackingActive) {
           let currentTime = (p.millis() - runStartTime) / 1000;
           if (p.millis() - lastLogTime > 250) {
