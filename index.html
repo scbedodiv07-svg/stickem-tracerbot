@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stick 'Em CV Line Tracker & Sensor Logger</title>
+  <title>Stick 'Em Robot CV Line Tracker</title>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; background: #9ca3af; color: #111827; margin: 0; transition: background 0.3s; }
@@ -138,15 +138,20 @@
     let pending   = null;   // Active command buffer
     let lastSent  = null;   // Write deduplication cache
     let writing   = false;  // GATT Write Guard concurrency block
+    let sendTimer = null;   // Interval reference
 
     // UI elements state
     let isTrackingActive = false;
-    let lineMode = "blackOnLight"; // Alternates with "whiteOnDark"
+    let lineMode = "blackOnLight"; // Alternating state toggle
     
     // Telemetry storage variables
     let accX = 0, accY = 0, accZ = 0;
     let runStartTime = 0;
     let telemetryData = [];
+
+    // Global variables calculated by CV loop, consumed by the 40Hz BLE loop
+    let calculatedHeadingError = 0;
+    let controlLineVisible = false;
 
     // Navigation state monitoring variables
     let currentDirection = "straight"; 
@@ -192,6 +197,7 @@
           statusEl.textContent = 'Disconnected';
           document.body.className = 'error-bg';
           toggleUIActivation(false);
+          stopSendLoop();
         });
 
         const server  = await device.gatt.connect();
@@ -289,10 +295,40 @@
     }
 
     function startSendLoop() {
-      setInterval(() => {
-        if (!connected || !pending || pending === lastSent || writing) return;
+      if (sendTimer) clearInterval(sendTimer);
+      sendTimer = setInterval(() => {
+        if (!connected) return;
+
+        // Construct commands dynamically inside the 40Hz window instead of the 60Hz p5 draw loop
+        if (isTrackingActive) {
+          if (controlLineVisible) {
+            let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
+            let steerGain = parseFloat(document.getElementById('steerGain').value);
+            
+            // Proportional steering deflection
+            let steeringCorrection = calculatedHeadingError * steerGain;
+            
+            // Map continuous servo rotation bounds explicitly
+            // Forward bias is added natively here to guarantee your motors spin
+            let leftMotor = 1500 + baseSpeed + steeringCorrection;
+            let rightMotor = 1500 - baseSpeed + steeringCorrection;
+
+            window.sendServos(leftMotor, rightMotor);
+          } else {
+            window.sendServos(1500, 1500); // Stop moving if line is lost
+          }
+        }
+
+        if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 25); // Run at exact ~40 Hz internal timing clock
+      }, 25); // Run at strict ~40 Hz internal hardware constraint
+    }
+
+    function stopSendLoop() {
+      if (sendTimer) {
+        clearInterval(sendTimer);
+        sendTimer = null;
+      }
     }
 
     // Native Device Sensors Streaming Handler
@@ -312,13 +348,12 @@
 
     function handleMotion(event) {
       if (!event.accelerationIncludingGravity) return;
-      // Mirror direct sensor axes coordinate readouts
       accX = event.accelerationIncludingGravity.x || 0;
       accY = event.accelerationIncludingGravity.y || 0;
       accZ = event.accelerationIncludingGravity.z || 0;
     }
 
-    // Custom Lightweight CV Processing Pipeline with Inline UI Generation
+    // Custom Lightweight CV Processing Pipeline
     const s = (p) => {
       let capture;
       let graphCanvas;
@@ -328,7 +363,6 @@
         let cvCanvas = p.createCanvas(320, 240);
         cvCanvas.parent('canvasHolder');
         
-        // Target structural back-facing camera configuration
         let constraints = {
           video: {
             facingMode: "environment",
@@ -341,7 +375,6 @@
         capture.size(320, 240);
         capture.hide();
 
-        // Separate Graphing Node
         graphCanvas = p.createGraphics(320, 150);
         graphCanvas.parent('graphHolder');
         setupGraphSkeleton();
@@ -351,65 +384,47 @@
         p.background(0);
         if (!capture.loadedmetadata) return;
 
-        // Render basic camera frame inside view window
         p.image(capture, 0, 0, 320, 240);
         capture.loadPixels();
 
         if (capture.pixels.length === 0) return;
 
-        // Configuration Hooks
-        let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
-        let steerGain = parseFloat(document.getElementById('steerGain').value);
         let userThreshold = parseInt(document.getElementById('threshold').value);
 
-        // Analyze Horizon Scanning Control Checkpoints
-        // Scan Line 1: Main Control Line (just in front of wheels, lower down)
+        // Scan Line 1: Tracking Checkpoint Zone
         let controlY = 180;
         let controlData = scanLineROI(capture, controlY, userThreshold);
 
-        // Scan Line 2: Predictive Path Horizon (further up frame)
+        // Scan Line 2: Predictive Path Horizon Checkpoint
         let predictiveY = 80;
         let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
 
-        // Process Main Control metrics
-        if (controlData.lineDetected) {
-          // Compute direct heading metric variations
-          let frameCenter = p.width / 2;
-          let headingError = controlData.centroid - frameCenter;
+        // Save status vectors safely for the 40Hz BLE sender clock
+        controlLineVisible = controlData.lineDetected;
 
-          // Paint visual feedback tags onto processing display layer
+        if (controlData.lineDetected) {
+          let frameCenter = p.width / 2;
+          calculatedHeadingError = controlData.centroid - frameCenter;
+
+          // Paint processing visualization overlay bounds
           p.stroke(0, 255, 0); p.strokeWeight(2);
           p.line(controlData.leftEdge, controlY, controlData.rightEdge, controlY);
           p.fill(255, 0, 0); p.noStroke();
           p.circle(controlData.centroid, controlY, 8);
 
-          // Categorize movement vectors
-          if (headingError < -15) currentDirection = "left";
-          else if (headingError > 15) currentDirection = "right";
+          if (calculatedHeadingError < -15) currentDirection = "left";
+          else if (calculatedHeadingError > 15) currentDirection = "right";
           else currentDirection = "straight";
-
-          // Calculate Steering Corrections dynamically using PID-proportional scaling
-          if (isTrackingActive) {
-            let steeringCorrection = headingError * steerGain;
-            
-            // Map Continuous Wheel Speeds around 1500 Neutral Axis 
-            // Left Wheel = Servo 1, Right Wheel = Servo 2
-            let leftMotor = 1500 + baseSpeed + steeringCorrection;
-            let rightMotor = 1500 - baseSpeed + steeringCorrection; // Counter-balanced rotation orientation
-
-            window.sendServos(leftMotor, rightMotor);
-          }
         } else {
+          calculatedHeadingError = 0;
           currentDirection = "straight";
-          if (isTrackingActive) window.sendServos(1500, 1500); // Fail-safe stop
         }
 
-        // Process Predictor Analysis Node metrics
+        // Process Predictor Analysis
         if (predictiveData.lineDetected) {
           let frameCenter = p.width / 2;
           let forwardDiff = predictiveData.centroid - frameCenter;
 
-          // Detect Intersections (Wide horizontal segments or multi-splits)
           if (predictiveData.lineWidth > 120) {
             predictedDirection = "straight"; 
             p.fill(255, 255, 0); p.textSize(16); p.textAlign(p.CENTER);
@@ -420,7 +435,6 @@
             else predictedDirection = "straight";
           }
 
-          // Paint visualization indicators
           p.stroke(0, 150, 255); p.strokeWeight(2);
           p.line(predictiveData.leftEdge, predictiveY, predictiveData.rightEdge, predictiveY);
           p.fill(0, 150, 255); p.noStroke();
@@ -429,13 +443,12 @@
           predictedDirection = "straight";
         }
 
-        // Update view arrow boxes
         updateNavigationArrows();
 
         // Handle Log Storage Cadence
         if (isTrackingActive) {
           let currentTime = (p.millis() - runStartTime) / 1000;
-          if (p.millis() - lastLogTime > 250) { // Log 4 instances per second
+          if (p.millis() - lastLogTime > 250) {
             logTelemetry(currentTime.toFixed(2), accX.toFixed(2), accY.toFixed(2), accZ.toFixed(2));
             lastLogTime = p.millis();
           }
@@ -443,12 +456,10 @@
         }
       };
 
-      // Lightweight Binary Image ROI Pixel-Row Scanner
       function scanLineROI(img, scanY, thresh) {
         let leftEdge = -1;
         let rightEdge = -1;
         
-        // Scan line components loop sequentially
         for (let x = 0; x < p.width; x++) {
           let index = (x + scanY * img.width) * 4;
           let r = img.pixels[index];
@@ -458,9 +469,9 @@
 
           let isTargetPixel = false;
           if (lineMode === "blackOnLight") {
-            isTargetPixel = (brightness < thresh); // Looking for dark values
+            isTargetPixel = (brightness < thresh);
           } else {
-            isTargetPixel = (brightness > thresh); // Looking for bright values
+            isTargetPixel = (brightness > thresh);
           }
 
           if (isTargetPixel) {
@@ -484,16 +495,14 @@
 
       function logTelemetry(t, x, y, z) {
         telemetryData.push({ t: parseFloat(t), x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) });
-        if (telemetryData.length > 50) telemetryData.shift(); // Keep visual chart queue balanced
+        if (telemetryData.length > 50) telemetryData.shift();
 
-        // Direct table element manipulation insertion
         let row = tableBody.insertRow(0);
         row.insertCell(0).innerText = t;
         row.insertCell(1).innerText = x;
         row.insertCell(2).innerText = y;
         row.insertCell(3).innerText = z;
 
-        // Truncate structural logging table layout memory overhead
         if (tableBody.rows.length > 30) {
           tableBody.deleteRow(30);
         }
@@ -503,7 +512,7 @@
         graphCanvas.background(20);
         graphCanvas.stroke(50);
         graphCanvas.line(40, 0, 40, 130);
-        graphCanvas.line(40, 65, 320, 65); // Neutral sensor zero plane
+        graphCanvas.line(40, 65, 320, 65);
       }
 
       function renderGraph(currentSec) {
@@ -512,11 +521,10 @@
         
         if (telemetryData.length < 2) return;
 
-        // Render line traces for each dimensional property array entry
         for (let axis of ['x', 'y', 'z']) {
-          if (axis === 'x') graphCanvas.stroke(239, 68, 68);       // Red X
-          else if (axis === 'y') graphCanvas.stroke(34, 197, 94);   // Green Y
-          else graphCanvas.stroke(59, 130, 246);                    // Blue Z
+          if (axis === 'x') graphCanvas.stroke(239, 68, 68);
+          else if (axis === 'y') graphCanvas.stroke(34, 197, 94);
+          else graphCanvas.stroke(59, 130, 246);
           
           graphCanvas.noFill();
           graphCanvas.strokeWeight(1.5);
@@ -524,16 +532,13 @@
           
           for (let i = 0; i < telemetryData.length; i++) {
             let d = telemetryData[i];
-            // Normalize graph mapping offsets across width
             let targetX = p.map(i, 0, telemetryData.length - 1, 40, 310);
-            // Map acceleration range scale (-20 to +20 m/s^2) inside vertical box boundary
             let targetY = p.map(d[axis], -20, 20, 130, 5);
             graphCanvas.vertex(targetX, targetY);
           }
           graphCanvas.endShape();
         }
 
-        // Overlay axis legend tracking text markers
         graphCanvas.noStroke();
         graphCanvas.fill(255);
         graphCanvas.textSize(10);
@@ -542,7 +547,6 @@
       }
     };
 
-    // Instantiate p5 Runtime Target Pipeline instance node
     new p5(s);
   </script>
 </body>
