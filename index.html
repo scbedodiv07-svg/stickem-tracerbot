@@ -79,13 +79,13 @@
           <h4>Sensitivity & Speed Tuning</h4>
           <div class="slider-row">
             <label>Base Speed:</label>
-            <input type="range" id="baseSpeed" min="0" max="200" value="100" />
-            <span id="baseSpeedVal">100</span>
+            <input type="range" id="baseSpeed" min="0" max="200" value="80" />
+            <span id="baseSpeedVal">80</span>
           </div>
           <div class="slider-row">
             <label>Steer Gain:</label>
-            <input type="range" id="steerGain" min="0.1" max="3.0" step="0.1" value="1.2" />
-            <span id="steerGainVal">1.2</span>
+            <input type="range" id="steerGain" min="0.1" max="3.0" step="0.1" value="1.0" />
+            <span id="steerGainVal">1.0</span>
           </div>
           <div class="slider-row">
             <label>CV Threshold:</label>
@@ -125,8 +125,13 @@
     let connected = false;
     let pending   = null;   
     let lastSent  = null;   
-    let writing   = false;  // Firm single GATT write concurrency guard flag
+    let writing   = false;  
     let sendTimer = null;   
+
+    // Track real hardware positions to execute current ramp limitations
+    let currentLeftPWM = 1500;
+    let currentRightPWM = 1500;
+    const MAX_PWM_RAMP_STEP = 15; // Strict electrical load-smoothing step size per interval frame
 
     let isTrackingActive = false;
     let lineMode = "blackOnLight"; 
@@ -166,14 +171,18 @@
     async function connect() {
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
+        
+        // Robust Fallback Picker Filter Array to guarantee connection handshake stability
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], 
-          optionalServices: [SERVICE_UUID],
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
         });
         
         device.addEventListener('gattserverdisconnected', () => {
           connected = false;
           isTrackingActive = false;
+          currentLeftPWM = 1500;
+          currentRightPWM = 1500;
           statusEl.textContent = 'Disconnected';
           document.body.className = 'error-bg';
           toggleUIActivation(false);
@@ -185,7 +194,7 @@
         bleChar = await service.getCharacteristic(TX_CHAR_UUID);
         
         connected = true;
-        statusEl.textContent = 'Connected to Board: ' + device.name;
+        statusEl.textContent = 'Connected to Board: ' + (device.name || "Stick 'Em");
         document.body.className = 'connected';
         toggleUIActivation(true);
         startSendLoop();
@@ -234,12 +243,17 @@
         startBtn.textContent = "Start Tracking";
         startBtn.className = "success";
         document.body.className = "connected";
+        // Reset speed targets safely
+        currentLeftPWM = 1500;
+        currentRightPWM = 1500;
         window.sendServos(1500, 1500); 
       }
     }
 
     function emergencyStop() {
       isTrackingActive = false;
+      currentLeftPWM = 1500;
+      currentRightPWM = 1500;
       startBtn.textContent = "Start Tracking";
       startBtn.className = "success";
       if (connected) document.body.className = "connected";
@@ -247,7 +261,6 @@
       window.stopAll();
     }
 
-    // High Optimization: Construct minimal command length to eliminate packet slicing drops
     window.sendServos = function (m1, m2) {
       const slots = [m1, m2].map(v =>
         (v === null || v === undefined)
@@ -261,14 +274,14 @@
 
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
-      writing = true; // Engage hard lock
+      writing = true; 
       try {
         await bleChar.writeValue(new TextEncoder().encode(cmd));
         lastSent = cmd;
       } catch (e) {
-        console.warn('GATT write dropped/blocked', e);
+        console.warn('GATT write blocked', e);
       } finally {
-        writing = false; // Disengage lock immediately on completion
+        writing = false; 
       }
     }
 
@@ -277,25 +290,41 @@
       sendTimer = setInterval(() => {
         if (!connected) return;
 
-        if (isTrackingActive) {
-          if (controlLineVisible) {
-            let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
-            let steerGain = parseFloat(document.getElementById('steerGain').value);
-            let steeringCorrection = calculatedHeadingError * steerGain;
-            
-            let leftMotor = 1500 + baseSpeed + steeringCorrection;
-            let rightMotor = 1500 - baseSpeed + steeringCorrection;
+        let targetLeft = 1500;
+        let targetRight = 1500;
 
-            window.sendServos(leftMotor, rightMotor);
-          } else {
-            window.sendServos(1500, 1500); 
-          }
+        if (isTrackingActive && controlLineVisible) {
+          let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
+          let steerGain = parseFloat(document.getElementById('steerGain').value);
+          let steeringCorrection = calculatedHeadingError * steerGain;
+          
+          targetLeft = 1500 + baseSpeed + steeringCorrection;
+          targetRight = 1500 - baseSpeed + steeringCorrection;
         }
 
-        // Strict validation layer
+        // Apply Software-Slowing current limitation adjustments
+        let diffLeft = targetLeft - currentLeftPWM;
+        if (Math.abs(diffLeft) > MAX_PWM_RAMP_STEP) {
+          currentLeftPWM += Math.sign(diffLeft) * MAX_PWM_RAMP_STEP;
+        } else {
+          currentLeftPWM = targetLeft;
+        }
+
+        let diffRight = targetRight - currentRightPWM;
+        if (Math.abs(diffRight) > MAX_PWM_RAMP_STEP) {
+          currentRightPWM += Math.sign(diffRight) * MAX_PWM_RAMP_STEP;
+        } else {
+          currentRightPWM = targetRight;
+        }
+
+        // Commit ramped values out to the controller stream
+        if (isTrackingActive) {
+          window.sendServos(currentLeftPWM, currentRightPWM);
+        }
+
         if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 30); // Eased down slightly to ~33Hz for maximum packet transfer safety
+      }, 30); 
     }
 
     function stopSendLoop() {
