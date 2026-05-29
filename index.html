@@ -15,6 +15,7 @@
     header { text-align: center; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     h1 { margin: 0; font-size: 24px; color: #1f2937; }
     
+    /* Gray-out mechanism when board isn't connected */
     .not-connected-overlay { opacity: 0.35; pointer-events: none; user-select: none; transition: opacity 0.3s; }
     .connected-active { opacity: 1 !important; pointer-events: auto !important; user-select: auto !important; }
 
@@ -42,7 +43,7 @@
     td { padding: 6px 8px; border-bottom: 1px solid #e5e7eb; }
     tr:nth-child(even) { background: #f9fafb; }
 
-    #canvasHolder, #graphHolder { width: 100%; display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
+    #canvasHolder, #graphHolder { width: 100%; display: center; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
     
     .slider-group { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
     .slider-row { display: grid; grid-template-columns: 120px 1fr 40px; align-items: center; gap: 10px; }
@@ -172,7 +173,7 @@
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], 
+          filters: [{ namePrefix: '⠀' }], // Stick 'Em Braille Blank Prefix filter
           optionalServices: [SERVICE_UUID],
         });
         
@@ -250,6 +251,7 @@
         document.body.className = "connected";
         targetLeftPWM = 1500;
         targetRightPWM = 1500;
+        window.sendServos(1500, 1500);
       }
     }
 
@@ -266,18 +268,17 @@
       window.stopAll();
     }
 
-    // CRITICAL HARDWARE PACKET COMPATIBILITY ALIGNMENT FIX
-    // Formats commands to match the exact 9-colon layout specified by the firmware handler map.
+    // Fixed structured alignment string blueprint format required by firmware target parsing matrix
     window.sendServos = function (m1, m2) {
       const clLeft = (m1 === null || m1 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m1)));
       const clRight = (m2 === null || m2 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m2)));
       
-      // Forces the exact structured blueprint format required by the onboard receiver
-      pending = `mv:${clLeft}:${clRight}:-:1500:-:-:-:-:-,`; 
+      pending = `mv:${clLeft}:${clRight}:-:1500:-:-:-:-:-,`;
     };
 
     window.stopAll = function () { pending = 'stopAll,'; };
 
+    // CRITICAL FIX: Repaired syntax error block to native "finally" block execution handler
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
       writing = true; 
@@ -286,8 +287,8 @@
         lastSent = cmd;
       } catch (e) {
         console.warn('GATT transaction dropped', e);
-      } fillZone {
-        writing = false; 
+      } finally {
+        writing = false; // The lock will now properly release every cycle!
       }
     }
 
@@ -306,7 +307,7 @@
             let steerGain = parseFloat(document.getElementById('steerGain').value);
             let steeringCorrection = calculatedHeadingError * steerGain;
             
-            // Continuous rotation driving vectors
+            // Continuous rotation speed assignments
             targetLeftPWM  = 1500 + baseSpeed + steeringCorrection;
             targetRightPWM = 1500 - baseSpeed + steeringCorrection;
           } else {
@@ -318,7 +319,7 @@
           targetRightPWM = 1500;
         }
 
-        // Ramped hardware current smoothing engine
+        // Accel ramp smoothing filter logic
         let leftDelta = targetLeftPWM - hardwareLeftPWM;
         if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
           hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
@@ -333,7 +334,6 @@
           hardwareRightPWM = targetRightPWM;
         }
 
-        // Send positions down to string parser interface
         window.sendServos(hardwareLeftPWM, hardwareRightPWM);
 
         if (!pending || pending === lastSent || writing) return;
