@@ -124,16 +124,16 @@
 
     let bleChar   = null;
     let connected = false;
-    let pending   = "stopAll,"; // Initialized safely to match board specifications
-    let lastSent  = null;   
+    let lastSent  = "";   
     let writing   = false;  
     let sendLoopInterval = null;
 
-    // Soft-Start velocity mapping profiles
+    // Soft-Start Ramping Constants to Eliminate Surge Overloads
     let hardwareLeftPWM  = 1500;
     let hardwareRightPWM = 1500;
     const MAX_ACCEL_STEP = 12; 
 
+    // Firmly initialized memory hooks
     let calculatedHeadingError = 0;
     let isLineDetectedInFrame = false;
 
@@ -173,8 +173,8 @@
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], // Stick 'Em Braille Blank Prefix filter
-          optionalServices: [SERVICE_UUID],
+          filters: [{ namePrefix: '⠀' }], // Unicode Braille Prefix match filter
+          optionalServices: [SERVICE_UUID]
         });
         
         device.addEventListener('gattserverdisconnected', () => {
@@ -196,6 +196,8 @@
         statusEl.textContent = 'Connected to Board: ' + device.name;
         document.body.className = 'connected';
         toggleUIActivation(true);
+        
+        // Initialize Core System Threads
         startSendLoop();
         requestMotionPermissions();
       } catch (e) {
@@ -249,36 +251,22 @@
         startBtn.textContent = "Start Tracking";
         startBtn.className = "success";
         document.body.className = "connected";
-        targetLeftPWM = 1500;
-        targetRightPWM = 1500;
         hardwareLeftPWM = 1500;
         hardwareRightPWM = 1500;
-        window.sendServos(1500, 1500);
+        sendRaw("stopAll,");
       }
     }
 
     function emergencyStop() {
       isTrackingActive = false;
-      targetLeftPWM = 1500;
-      targetRightPWM = 1500;
       hardwareLeftPWM = 1500;
       hardwareRightPWM = 1500;
       startBtn.textContent = "Start Tracking";
       startBtn.className = "success";
       if (connected) document.body.className = "connected";
       else document.body.className = "";
-      window.stopAll();
+      sendRaw("stopAll,");
     }
-
-    // Fixed structured alignment format matching Stick 'Em parsing index positions
-    window.sendServos = function (m1, m2) {
-      const clLeft = (m1 === null || m1 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m1)));
-      const clRight = (m2 === null || m2 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m2)));
-      
-      pending = `mv:${clLeft}:${clRight}:-:1500:-:-:-:-:-,`;
-    };
-
-    window.stopAll = function () { pending = 'stopAll,'; };
 
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
@@ -287,14 +275,11 @@
         await bleChar.writeValue(new TextEncoder().encode(cmd));
         lastSent = cmd;
       } catch (e) {
-        console.warn('GATT transaction dropped', e);
+        console.warn('GATT transaction error', e);
       } finally {
         writing = false; 
       }
     }
-
-    let targetLeftPWM = 1500;
-    let targetRightPWM = 1500;
 
     function startSendLoop() {
       if (sendLoopInterval) clearInterval(sendLoopInterval);
@@ -302,46 +287,42 @@
       sendLoopInterval = setInterval(() => {
         if (!connected) return;
 
-        // CRITICAL LOGIC ALIGNMENT FIX: Run calculation sequence cleanly regardless of state
-        if (isTrackingActive) {
-          if (isLineDetectedInFrame) {
-            let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
-            let steerGain = parseFloat(document.getElementById('steerGain').value);
-            let steeringCorrection = calculatedHeadingError * steerGain;
-            
-            // Continuous rotation driving vectors assignments
-            targetLeftPWM  = 1500 + baseSpeed + steeringCorrection;
-            targetRightPWM = 1500 - baseSpeed + steeringCorrection;
-          } else {
-            targetLeftPWM  = 1500;
-            targetRightPWM = 1500;
-          }
-        } else {
-          targetLeftPWM  = 1500;
-          targetRightPWM = 1500;
+        let targetLeft = 1500;
+        let targetRight = 1500;
+
+        // FIXED: Calculation logic evaluates dynamically, preventing execution halts
+        if (isTrackingActive && isLineDetectedInFrame) {
+          let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
+          let steerGain = parseFloat(document.getElementById('steerGain').value);
+          let steeringCorrection = calculatedHeadingError * steerGain;
+          
+          targetLeft  = 1500 + baseSpeed + steeringCorrection;
+          targetRight = 1500 - baseSpeed + steeringCorrection;
         }
 
-        // Software acceleration dampening engine runs continuously to preserve hardware state
-        let leftDelta = targetLeftPWM - hardwareLeftPWM;
+        // Apply Ramping Smoothing Math
+        let leftDelta = targetLeft - hardwareLeftPWM;
         if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
           hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
         } else {
-          hardwareLeftPWM = targetLeftPWM;
+          hardwareLeftPWM = targetLeft;
         }
 
-        let rightDelta = targetRightPWM - hardwareRightPWM;
+        let rightDelta = targetRight - hardwareRightPWM;
         if (Math.abs(rightDelta) > MAX_ACCEL_STEP) {
           hardwareRightPWM += Math.sign(rightDelta) * MAX_ACCEL_STEP;
         } else {
-          hardwareRightPWM = targetRightPWM;
+          hardwareRightPWM = targetRight;
         }
 
-        // Continually write current structural matrix positions out to command parser string
-        window.sendServos(hardwareLeftPWM, hardwareRightPWM);
+        // FIXED: Build the exact string alignment format inside the local loop context to prevent scope races
+        const clLeft = Math.max(1000, Math.min(2000, Math.round(hardwareLeftPWM)));
+        const clRight = Math.max(1000, Math.min(2000, Math.round(hardwareRightPWM)));
+        const activeCmd = `mv:${clLeft}:${clRight}:-:1500:-:-:-:-:-,`;
 
-        if (!pending || pending === lastSent || writing) return;
-        sendRaw(pending);
-      }, 25); 
+        if (activeCmd === lastSent || writing) return;
+        sendRaw(activeCmd);
+      }, 25); // Core Max Cadence hardlocked at 40Hz
     }
 
     function stopSendLoop() {
@@ -415,6 +396,7 @@
         let predictiveY = 80;
         let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
 
+        // Safely update global atomic scoping variables
         isLineDetectedInFrame = controlData.lineDetected;
 
         if (controlData.lineDetected) {
