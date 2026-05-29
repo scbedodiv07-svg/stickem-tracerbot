@@ -15,7 +15,6 @@
     header { text-align: center; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     h1 { margin: 0; font-size: 24px; color: #1f2937; }
     
-    /* Gray-out mechanism when board isn't connected */
     .not-connected-overlay { opacity: 0.35; pointer-events: none; user-select: none; transition: opacity 0.3s; }
     .connected-active { opacity: 1 !important; pointer-events: auto !important; user-select: auto !important; }
 
@@ -45,7 +44,6 @@
 
     #canvasHolder, #graphHolder { width: 100%; display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
     
-    /* Input tuning sliders */
     .slider-group { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
     .slider-row { display: grid; grid-template-columns: 120px 1fr 40px; align-items: center; gap: 10px; }
   </style>
@@ -68,7 +66,6 @@
     </div>
 
     <div class="grid-layout">
-      
       <div class="card not-connected-overlay" id="cvCard">
         <h3>Live Back Camera & Tracking Output</h3>
         <div id="canvasHolder"></div>
@@ -117,45 +114,38 @@
           </table>
         </div>
       </div>
-
     </div>
   </div>
 
   <script type="module">
-    // Hardware Protocol Specifications
     const SERVICE_UUID = 0xFFE0;
     const TX_CHAR_UUID = 0xFFE1;
 
     let bleChar   = null;
     let connected = false;
-    let pending   = null;   // Active command buffer
-    let lastSent  = null;   // Write deduplication cache
-    let writing   = false;  // GATT Write Guard concurrency block
+    let pending   = null;   
+    let lastSent  = null;   
+    let writing   = false;  
     let sendLoopInterval = null;
 
-    // Soft-Start Electrical Preservation State Engine (Anti-Brownout Variables)
+    // Smooth Soft-Start Variables to prevent initial current spikes
     let hardwareLeftPWM  = 1500;
     let hardwareRightPWM = 1500;
-    const MAX_ACCEL_STEP = 12; // Safe localized duty cycle current limits
+    const MAX_ACCEL_STEP = 12; 
 
-    // Shared thread memory buffers
     let calculatedHeadingError = 0;
     let isLineDetectedInFrame = false;
 
-    // UI elements state
     let isTrackingActive = false;
     let lineMode = "blackOnLight"; 
     
-    // Telemetry storage variables
     let accX = 0, accY = 0, accZ = 0;
     let runStartTime = 0;
     let telemetryData = [];
 
-    // Navigation state monitoring variables
     let currentDirection = "straight"; 
     let predictedDirection = "straight";
 
-    // Grab interface hooks
     const statusEl = document.getElementById('status');
     const connectBtn = document.getElementById('connect');
     const startBtn = document.getElementById('startTracker');
@@ -163,13 +153,11 @@
     const modeBtn = document.getElementById('toggleMode');
     const tableBody = document.getElementById('tableBody');
 
-    // UI Element Binding
     connectBtn.onclick = connect;
     stopBtn.onclick = emergencyStop;
     startBtn.onclick = toggleTracking;
     modeBtn.onclick = toggleTrackingMode;
 
-    // Direct interface value listeners
     setupSliderListener('baseSpeed', 'baseSpeedVal');
     setupSliderListener('steerGain', 'steerGainVal');
     setupSliderListener('threshold', 'thresholdVal');
@@ -180,12 +168,11 @@
       slider.oninput = () => { display.textContent = slider.value; };
     }
 
-    // Connect to Stick 'Em BLE Controller
     async function connect() {
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], // Braille Prefix matching filter
+          filters: [{ namePrefix: '⠀' }], 
           optionalServices: [SERVICE_UUID],
         });
         
@@ -209,8 +196,6 @@
         document.body.className = 'connected';
         toggleUIActivation(true);
         startSendLoop();
-
-        // Enable accelerometer streaming on click context window
         requestMotionPermissions();
       } catch (e) {
         statusEl.textContent = 'Connection failed: ' + e.message;
@@ -281,32 +266,31 @@
       window.stopAll();
     }
 
-    // Hardware Interface Output Mappers
+    // CRITICAL HARDWARE PACKET COMPATIBILITY ALIGNMENT FIX
+    // Formats commands to match the exact 9-colon layout specified by the firmware handler map.
     window.sendServos = function (m1, m2) {
-      const slots = [m1, m2, null, null, null, null, null, null].map(v =>
-        (v === null || v === undefined)
-          ? '-'
-          : Math.max(1000, Math.min(2000, Math.round(v)))
-      );
-      pending = `mv:${slots.join(':')},`;
+      const clLeft = (m1 === null || m1 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m1)));
+      const clRight = (m2 === null || m2 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m2)));
+      
+      // Forces the exact structured blueprint format required by the onboard receiver
+      pending = `mv:${clLeft}:${clRight}:-:1500:-:-:-:-:-,`; 
     };
 
     window.stopAll = function () { pending = 'stopAll,'; };
 
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
-      writing = true; // Engage atomic write guard
+      writing = true; 
       try {
         await bleChar.writeValue(new TextEncoder().encode(cmd));
         lastSent = cmd;
       } catch (e) {
         console.warn('GATT transaction dropped', e);
-      } finally {
-        writing = false; // Release lock
+      } fillZone {
+        writing = false; 
       }
     }
 
-    // Global variable targets driven by calculation, picked up by the interval thread
     let targetLeftPWM = 1500;
     let targetRightPWM = 1500;
 
@@ -316,18 +300,16 @@
       sendLoopInterval = setInterval(() => {
         if (!connected) return;
 
-        // Process motor control commands strictly within the isolated 40Hz channel
         if (isTrackingActive) {
           if (isLineDetectedInFrame) {
             let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
             let steerGain = parseFloat(document.getElementById('steerGain').value);
             let steeringCorrection = calculatedHeadingError * steerGain;
             
-            // Continuous drive bias vectors mapping
+            // Continuous rotation driving vectors
             targetLeftPWM  = 1500 + baseSpeed + steeringCorrection;
             targetRightPWM = 1500 - baseSpeed + steeringCorrection;
           } else {
-            // Safe fall-back if tracking line is dropped
             targetLeftPWM  = 1500;
             targetRightPWM = 1500;
           }
@@ -336,7 +318,7 @@
           targetRightPWM = 1500;
         }
 
-        // Software Soft-Start Electrical Ramp Engine (Anti-Brownout Execution Block)
+        // Ramped hardware current smoothing engine
         let leftDelta = targetLeftPWM - hardwareLeftPWM;
         if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
           hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
@@ -351,13 +333,12 @@
           hardwareRightPWM = targetRightPWM;
         }
 
-        // Generate down-scaled commands array
+        // Send positions down to string parser interface
         window.sendServos(hardwareLeftPWM, hardwareRightPWM);
 
-        // Deduplication and concurrency filtering
         if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 25); // Hardlocked at ~40Hz execution loop channel
+      }, 25); 
     }
 
     function stopSendLoop() {
@@ -367,7 +348,6 @@
       }
     }
 
-    // Native Device Sensors Streaming Handler
     function requestMotionPermissions() {
       if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission()
@@ -389,7 +369,6 @@
       accZ = event.accelerationIncludingGravity.z || 0;
     }
 
-    // Custom Lightweight CV Processing Pipeline with Inline UI Generation
     const s = (p) => {
       let capture;
       let graphCanvas;
@@ -399,7 +378,6 @@
         let cvCanvas = p.createCanvas(320, 240);
         cvCanvas.parent('canvasHolder');
         
-        // Target structural back-facing camera configuration
         let constraints = {
           video: {
             facingMode: "environment",
@@ -412,7 +390,6 @@
         capture.size(320, 240);
         capture.hide();
 
-        // Separate Graphing Node
         graphCanvas = p.createGraphics(320, 150);
         graphCanvas.parent('graphHolder');
         setupGraphSkeleton();
@@ -422,7 +399,6 @@
         p.background(0);
         if (!capture.loadedmetadata) return;
 
-        // Render basic camera frame inside view window
         p.image(capture, 0, 0, 320, 240);
         capture.loadPixels();
 
@@ -430,28 +406,23 @@
 
         let userThreshold = parseInt(document.getElementById('threshold').value);
 
-        // Analyze Horizon Scanning Control Checkpoints
         let controlY = 180;
         let controlData = scanLineROI(capture, controlY, userThreshold);
 
         let predictiveY = 80;
         let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
 
-        // Pipe localization states to decoupled execution thread safely
         isLineDetectedInFrame = controlData.lineDetected;
 
-        // Process Main Control metrics
         if (controlData.lineDetected) {
           let frameCenter = p.width / 2;
           calculatedHeadingError = controlData.centroid - frameCenter;
 
-          // Paint visual feedback tags onto processing display layer
           p.stroke(0, 255, 0); p.strokeWeight(2);
           p.line(controlData.leftEdge, controlY, controlData.rightEdge, controlY);
           p.fill(255, 0, 0); p.noStroke();
           p.circle(controlData.centroid, controlY, 8);
 
-          // Categorize movement vectors
           if (calculatedHeadingError < -15) currentDirection = "left";
           else if (calculatedHeadingError > 15) currentDirection = "right";
           else currentDirection = "straight";
@@ -460,12 +431,10 @@
           currentDirection = "straight";
         }
 
-        // Process Predictor Analysis Node metrics
         if (predictiveData.lineDetected) {
           let frameCenter = p.width / 2;
           let forwardDiff = predictiveData.centroid - frameCenter;
 
-          // Detect Intersections (Wide horizontal segments or multi-splits)
           if (predictiveData.lineWidth > 120) {
             predictedDirection = "straight"; 
             p.fill(255, 255, 0); p.textSize(16); p.textAlign(p.CENTER);
@@ -476,7 +445,6 @@
             else predictedDirection = "straight";
           }
 
-          // Paint visualization indicators
           p.stroke(0, 150, 255); p.strokeWeight(2);
           p.line(predictiveData.leftEdge, predictiveY, predictiveData.rightEdge, predictiveY);
           p.fill(0, 150, 255); p.noStroke();
@@ -485,13 +453,11 @@
           predictedDirection = "straight";
         }
 
-        // Update view arrow boxes
         updateNavigationArrows();
 
-        // Handle Log Storage Cadence
         if (isTrackingActive) {
           let currentTime = (p.millis() - runStartTime) / 1000;
-          if (p.millis() - lastLogTime > 250) { // Log 4 instances per second
+          if (p.millis() - lastLogTime > 250) { 
             logTelemetry(currentTime.toFixed(2), accX.toFixed(2), accY.toFixed(2), accZ.toFixed(2));
             lastLogTime = p.millis();
           }
@@ -499,7 +465,6 @@
         }
       };
 
-      // Lightweight Binary Image ROI Pixel-Row Scanner
       function scanLineROI(img, scanY, thresh) {
         let leftEdge = -1;
         let rightEdge = -1;
