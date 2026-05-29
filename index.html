@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stick 'Em Robot CV Line Tracker</title>
+  <title>Stick 'Em CV Line Tracker & Sensor Logger</title>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; padding: 20px; background: #9ca3af; color: #111827; margin: 0; transition: background 0.3s; }
@@ -15,6 +15,7 @@
     header { text-align: center; background: rgba(255, 255, 255, 0.9); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     h1 { margin: 0; font-size: 24px; color: #1f2937; }
     
+    /* Gray-out mechanism when board isn't connected */
     .not-connected-overlay { opacity: 0.35; pointer-events: none; user-select: none; transition: opacity 0.3s; }
     .connected-active { opacity: 1 !important; pointer-events: auto !important; user-select: auto !important; }
 
@@ -44,6 +45,7 @@
 
     #canvasHolder, #graphHolder { width: 100%; display: flex; justify-content: center; background: #000; border-radius: 8px; overflow: hidden; }
     
+    /* Input tuning sliders */
     .slider-group { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
     .slider-row { display: grid; grid-template-columns: 120px 1fr 40px; align-items: center; gap: 10px; }
   </style>
@@ -66,6 +68,7 @@
     </div>
 
     <div class="grid-layout">
+      
       <div class="card not-connected-overlay" id="cvCard">
         <h3>Live Back Camera & Tracking Output</h3>
         <div id="canvasHolder"></div>
@@ -79,13 +82,13 @@
           <h4>Sensitivity & Speed Tuning</h4>
           <div class="slider-row">
             <label>Base Speed:</label>
-            <input type="range" id="baseSpeed" min="0" max="200" value="80" />
-            <span id="baseSpeedVal">80</span>
+            <input type="range" id="baseSpeed" min="0" max="200" value="100" />
+            <span id="baseSpeedVal">100</span>
           </div>
           <div class="slider-row">
             <label>Steer Gain:</label>
-            <input type="range" id="steerGain" min="0.1" max="3.0" step="0.1" value="1.0" />
-            <span id="steerGainVal">1.0</span>
+            <input type="range" id="steerGain" min="0.1" max="3.0" step="0.1" value="1.2" />
+            <span id="steerGainVal">1.2</span>
           </div>
           <div class="slider-row">
             <label>CV Threshold:</label>
@@ -114,38 +117,45 @@
           </table>
         </div>
       </div>
+
     </div>
   </div>
 
   <script type="module">
+    // Hardware Protocol Specifications
     const SERVICE_UUID = 0xFFE0;
     const TX_CHAR_UUID = 0xFFE1;
 
     let bleChar   = null;
     let connected = false;
-    let pending   = null;   
-    let lastSent  = null;   
-    let writing   = false;  
-    let sendTimer = null;   
+    let pending   = null;   // Active command buffer
+    let lastSent  = null;   // Write deduplication cache
+    let writing   = false;  // GATT Write Guard concurrency block
+    let sendLoopInterval = null;
 
-    // Track real hardware positions to execute current ramp limitations
-    let currentLeftPWM = 1500;
-    let currentRightPWM = 1500;
-    const MAX_PWM_RAMP_STEP = 15; // Strict electrical load-smoothing step size per interval frame
+    // Soft-Start Electrical Preservation State Engine (Anti-Brownout Variables)
+    let hardwareLeftPWM  = 1500;
+    let hardwareRightPWM = 1500;
+    const MAX_ACCEL_STEP = 12; // Safe localized duty cycle current limits
 
+    // Shared thread memory buffers
+    let calculatedHeadingError = 0;
+    let isLineDetectedInFrame = false;
+
+    // UI elements state
     let isTrackingActive = false;
     let lineMode = "blackOnLight"; 
     
+    // Telemetry storage variables
     let accX = 0, accY = 0, accZ = 0;
     let runStartTime = 0;
     let telemetryData = [];
 
-    let calculatedHeadingError = 0;
-    let controlLineVisible = false;
-
+    // Navigation state monitoring variables
     let currentDirection = "straight"; 
     let predictedDirection = "straight";
 
+    // Grab interface hooks
     const statusEl = document.getElementById('status');
     const connectBtn = document.getElementById('connect');
     const startBtn = document.getElementById('startTracker');
@@ -153,11 +163,13 @@
     const modeBtn = document.getElementById('toggleMode');
     const tableBody = document.getElementById('tableBody');
 
+    // UI Element Binding
     connectBtn.onclick = connect;
     stopBtn.onclick = emergencyStop;
     startBtn.onclick = toggleTracking;
     modeBtn.onclick = toggleTrackingMode;
 
+    // Direct interface value listeners
     setupSliderListener('baseSpeed', 'baseSpeedVal');
     setupSliderListener('steerGain', 'steerGainVal');
     setupSliderListener('threshold', 'thresholdVal');
@@ -168,21 +180,20 @@
       slider.oninput = () => { display.textContent = slider.value; };
     }
 
+    // Connect to Stick 'Em BLE Controller
     async function connect() {
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
-        
-        // Robust Fallback Picker Filter Array to guarantee connection handshake stability
         const device = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: [SERVICE_UUID]
+          filters: [{ namePrefix: '⠀' }], // Braille Prefix matching filter
+          optionalServices: [SERVICE_UUID],
         });
         
         device.addEventListener('gattserverdisconnected', () => {
           connected = false;
           isTrackingActive = false;
-          currentLeftPWM = 1500;
-          currentRightPWM = 1500;
+          hardwareLeftPWM = 1500;
+          hardwareRightPWM = 1500;
           statusEl.textContent = 'Disconnected';
           document.body.className = 'error-bg';
           toggleUIActivation(false);
@@ -194,10 +205,12 @@
         bleChar = await service.getCharacteristic(TX_CHAR_UUID);
         
         connected = true;
-        statusEl.textContent = 'Connected to Board: ' + (device.name || "Stick 'Em");
+        statusEl.textContent = 'Connected to Board: ' + device.name;
         document.body.className = 'connected';
         toggleUIActivation(true);
         startSendLoop();
+
+        // Enable accelerometer streaming on click context window
         requestMotionPermissions();
       } catch (e) {
         statusEl.textContent = 'Connection failed: ' + e.message;
@@ -219,14 +232,21 @@
       }
     }
 
+    function toggleModeBtnUI() {
+      if (lineMode === "blackOnLight") {
+        modeBtn.textContent = "Mode: Black Line / Light Floor";
+      } else {
+        modeBtn.textContent = "Mode: White Line / Dark Floor";
+      }
+    }
+
     function toggleTrackingMode() {
       if (lineMode === "blackOnLight") {
         lineMode = "whiteOnDark";
-        modeBtn.textContent = "Mode: White Line / Dark Floor";
       } else {
         lineMode = "blackOnLight";
-        modeBtn.textContent = "Mode: Black Line / Light Floor";
       }
+      toggleModeBtnUI();
     }
 
     function toggleTracking() {
@@ -243,17 +263,17 @@
         startBtn.textContent = "Start Tracking";
         startBtn.className = "success";
         document.body.className = "connected";
-        // Reset speed targets safely
-        currentLeftPWM = 1500;
-        currentRightPWM = 1500;
-        window.sendServos(1500, 1500); 
+        targetLeftPWM = 1500;
+        targetRightPWM = 1500;
       }
     }
 
     function emergencyStop() {
       isTrackingActive = false;
-      currentLeftPWM = 1500;
-      currentRightPWM = 1500;
+      targetLeftPWM = 1500;
+      targetRightPWM = 1500;
+      hardwareLeftPWM = 1500;
+      hardwareRightPWM = 1500;
       startBtn.textContent = "Start Tracking";
       startBtn.className = "success";
       if (connected) document.body.className = "connected";
@@ -261,8 +281,9 @@
       window.stopAll();
     }
 
+    // Hardware Interface Output Mappers
     window.sendServos = function (m1, m2) {
-      const slots = [m1, m2].map(v =>
+      const slots = [m1, m2, null, null, null, null, null, null].map(v =>
         (v === null || v === undefined)
           ? '-'
           : Math.max(1000, Math.min(2000, Math.round(v)))
@@ -274,66 +295,79 @@
 
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
-      writing = true; 
+      writing = true; // Engage atomic write guard
       try {
         await bleChar.writeValue(new TextEncoder().encode(cmd));
         lastSent = cmd;
       } catch (e) {
-        console.warn('GATT write blocked', e);
+        console.warn('GATT transaction dropped', e);
       } finally {
-        writing = false; 
+        writing = false; // Release lock
       }
     }
 
+    // Global variable targets driven by calculation, picked up by the interval thread
+    let targetLeftPWM = 1500;
+    let targetRightPWM = 1500;
+
     function startSendLoop() {
-      if (sendTimer) clearInterval(sendTimer);
-      sendTimer = setInterval(() => {
+      if (sendLoopInterval) clearInterval(sendLoopInterval);
+      
+      sendLoopInterval = setInterval(() => {
         if (!connected) return;
 
-        let targetLeft = 1500;
-        let targetRight = 1500;
-
-        if (isTrackingActive && controlLineVisible) {
-          let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
-          let steerGain = parseFloat(document.getElementById('steerGain').value);
-          let steeringCorrection = calculatedHeadingError * steerGain;
-          
-          targetLeft = 1500 + baseSpeed + steeringCorrection;
-          targetRight = 1500 - baseSpeed + steeringCorrection;
-        }
-
-        // Apply Software-Slowing current limitation adjustments
-        let diffLeft = targetLeft - currentLeftPWM;
-        if (Math.abs(diffLeft) > MAX_PWM_RAMP_STEP) {
-          currentLeftPWM += Math.sign(diffLeft) * MAX_PWM_RAMP_STEP;
-        } else {
-          currentLeftPWM = targetLeft;
-        }
-
-        let diffRight = targetRight - currentRightPWM;
-        if (Math.abs(diffRight) > MAX_PWM_RAMP_STEP) {
-          currentRightPWM += Math.sign(diffRight) * MAX_PWM_RAMP_STEP;
-        } else {
-          currentRightPWM = targetRight;
-        }
-
-        // Commit ramped values out to the controller stream
+        // Process motor control commands strictly within the isolated 40Hz channel
         if (isTrackingActive) {
-          window.sendServos(currentLeftPWM, currentRightPWM);
+          if (isLineDetectedInFrame) {
+            let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
+            let steerGain = parseFloat(document.getElementById('steerGain').value);
+            let steeringCorrection = calculatedHeadingError * steerGain;
+            
+            // Continuous drive bias vectors mapping
+            targetLeftPWM  = 1500 + baseSpeed + steeringCorrection;
+            targetRightPWM = 1500 - baseSpeed + steeringCorrection;
+          } else {
+            // Safe fall-back if tracking line is dropped
+            targetLeftPWM  = 1500;
+            targetRightPWM = 1500;
+          }
+        } else {
+          targetLeftPWM  = 1500;
+          targetRightPWM = 1500;
         }
 
+        // Software Soft-Start Electrical Ramp Engine (Anti-Brownout Execution Block)
+        let leftDelta = targetLeftPWM - hardwareLeftPWM;
+        if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
+          hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
+        } else {
+          hardwareLeftPWM = targetLeftPWM;
+        }
+
+        let rightDelta = targetRightPWM - hardwareRightPWM;
+        if (Math.abs(rightDelta) > MAX_ACCEL_STEP) {
+          hardwareRightPWM += Math.sign(rightDelta) * MAX_ACCEL_STEP;
+        } else {
+          hardwareRightPWM = targetRightPWM;
+        }
+
+        // Generate down-scaled commands array
+        window.sendServos(hardwareLeftPWM, hardwareRightPWM);
+
+        // Deduplication and concurrency filtering
         if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 30); 
+      }, 25); // Hardlocked at ~40Hz execution loop channel
     }
 
     function stopSendLoop() {
-      if (sendTimer) {
-        clearInterval(sendTimer);
-        sendTimer = null;
+      if (sendLoopInterval) {
+        clearInterval(sendLoopInterval);
+        sendLoopInterval = null;
       }
     }
 
+    // Native Device Sensors Streaming Handler
     function requestMotionPermissions() {
       if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
         DeviceMotionEvent.requestPermission()
@@ -355,6 +389,7 @@
       accZ = event.accelerationIncludingGravity.z || 0;
     }
 
+    // Custom Lightweight CV Processing Pipeline with Inline UI Generation
     const s = (p) => {
       let capture;
       let graphCanvas;
@@ -364,6 +399,7 @@
         let cvCanvas = p.createCanvas(320, 240);
         cvCanvas.parent('canvasHolder');
         
+        // Target structural back-facing camera configuration
         let constraints = {
           video: {
             facingMode: "environment",
@@ -376,6 +412,7 @@
         capture.size(320, 240);
         capture.hide();
 
+        // Separate Graphing Node
         graphCanvas = p.createGraphics(320, 150);
         graphCanvas.parent('graphHolder');
         setupGraphSkeleton();
@@ -385,6 +422,7 @@
         p.background(0);
         if (!capture.loadedmetadata) return;
 
+        // Render basic camera frame inside view window
         p.image(capture, 0, 0, 320, 240);
         capture.loadPixels();
 
@@ -392,23 +430,28 @@
 
         let userThreshold = parseInt(document.getElementById('threshold').value);
 
+        // Analyze Horizon Scanning Control Checkpoints
         let controlY = 180;
         let controlData = scanLineROI(capture, controlY, userThreshold);
 
         let predictiveY = 80;
         let predictiveData = scanLineROI(capture, predictiveY, userThreshold);
 
-        controlLineVisible = controlData.lineDetected;
+        // Pipe localization states to decoupled execution thread safely
+        isLineDetectedInFrame = controlData.lineDetected;
 
+        // Process Main Control metrics
         if (controlData.lineDetected) {
           let frameCenter = p.width / 2;
           calculatedHeadingError = controlData.centroid - frameCenter;
 
+          // Paint visual feedback tags onto processing display layer
           p.stroke(0, 255, 0); p.strokeWeight(2);
           p.line(controlData.leftEdge, controlY, controlData.rightEdge, controlY);
           p.fill(255, 0, 0); p.noStroke();
           p.circle(controlData.centroid, controlY, 8);
 
+          // Categorize movement vectors
           if (calculatedHeadingError < -15) currentDirection = "left";
           else if (calculatedHeadingError > 15) currentDirection = "right";
           else currentDirection = "straight";
@@ -417,10 +460,12 @@
           currentDirection = "straight";
         }
 
+        // Process Predictor Analysis Node metrics
         if (predictiveData.lineDetected) {
           let frameCenter = p.width / 2;
           let forwardDiff = predictiveData.centroid - frameCenter;
 
+          // Detect Intersections (Wide horizontal segments or multi-splits)
           if (predictiveData.lineWidth > 120) {
             predictedDirection = "straight"; 
             p.fill(255, 255, 0); p.textSize(16); p.textAlign(p.CENTER);
@@ -431,6 +476,7 @@
             else predictedDirection = "straight";
           }
 
+          // Paint visualization indicators
           p.stroke(0, 150, 255); p.strokeWeight(2);
           p.line(predictiveData.leftEdge, predictiveY, predictiveData.rightEdge, predictiveY);
           p.fill(0, 150, 255); p.noStroke();
@@ -439,11 +485,13 @@
           predictedDirection = "straight";
         }
 
+        // Update view arrow boxes
         updateNavigationArrows();
 
+        // Handle Log Storage Cadence
         if (isTrackingActive) {
           let currentTime = (p.millis() - runStartTime) / 1000;
-          if (p.millis() - lastLogTime > 250) {
+          if (p.millis() - lastLogTime > 250) { // Log 4 instances per second
             logTelemetry(currentTime.toFixed(2), accX.toFixed(2), accY.toFixed(2), accZ.toFixed(2));
             lastLogTime = p.millis();
           }
@@ -451,6 +499,7 @@
         }
       };
 
+      // Lightweight Binary Image ROI Pixel-Row Scanner
       function scanLineROI(img, scanY, thresh) {
         let leftEdge = -1;
         let rightEdge = -1;
@@ -464,9 +513,9 @@
 
           let isTargetPixel = false;
           if (lineMode === "blackOnLight") {
-            isTargetPixel = (brightness < thresh);
+            isTargetPixel = (brightness < thresh); 
           } else {
-            isTargetPixel = (brightness > thresh);
+            isTargetPixel = (brightness > thresh); 
           }
 
           if (isTargetPixel) {
@@ -490,7 +539,7 @@
 
       function logTelemetry(t, x, y, z) {
         telemetryData.push({ t: parseFloat(t), x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) });
-        if (telemetryData.length > 50) telemetryData.shift();
+        if (telemetryData.length > 50) telemetryData.shift(); 
 
         let row = tableBody.insertRow(0);
         row.insertCell(0).innerText = t;
@@ -507,7 +556,7 @@
         graphCanvas.background(20);
         graphCanvas.stroke(50);
         graphCanvas.line(40, 0, 40, 130);
-        graphCanvas.line(40, 65, 320, 65);
+        graphCanvas.line(40, 65, 320, 65); 
       }
 
       function renderGraph(currentSec) {
@@ -517,9 +566,9 @@
         if (telemetryData.length < 2) return;
 
         for (let axis of ['x', 'y', 'z']) {
-          if (axis === 'x') graphCanvas.stroke(239, 68, 68);
-          else if (axis === 'y') graphCanvas.stroke(34, 197, 94);
-          else graphCanvas.stroke(59, 130, 246);
+          if (axis === 'x') graphCanvas.stroke(239, 68, 68);       
+          else if (axis === 'y') graphCanvas.stroke(34, 197, 94);   
+          else graphCanvas.stroke(59, 130, 246);                    
           
           graphCanvas.noFill();
           graphCanvas.strokeWeight(1.5);
