@@ -124,12 +124,12 @@
 
     let bleChar   = null;
     let connected = false;
-    let pending   = null;   
+    let pending   = "stopAll,"; // Initialized safely to match board specifications
     let lastSent  = null;   
     let writing   = false;  
     let sendLoopInterval = null;
 
-    // Smooth Soft-Start acceleration settings
+    // Soft-Start velocity mapping profiles
     let hardwareLeftPWM  = 1500;
     let hardwareRightPWM = 1500;
     const MAX_ACCEL_STEP = 12; 
@@ -141,7 +141,7 @@
     let lineMode = "blackOnLight"; 
     
     let accX = 0, accY = 0, accZ = 0;
-    let runStartTime = 0; // Pure Web Native Timestamp Holder (Fixes p5 scope collision)
+    let runStartTime = 0; 
     let telemetryData = [];
 
     let currentDirection = "straight"; 
@@ -173,7 +173,7 @@
       try {
         statusEl.textContent = 'Scanning for Stick \'Em Board...';
         const device = await navigator.bluetooth.requestDevice({
-          filters: [{ namePrefix: '⠀' }], // Invisible Braille blank match filter
+          filters: [{ namePrefix: '⠀' }], // Stick 'Em Braille Blank Prefix filter
           optionalServices: [SERVICE_UUID],
         });
         
@@ -242,7 +242,7 @@
         startBtn.textContent = "Pause Tracking";
         startBtn.className = "danger";
         document.body.className = "running";
-        runStartTime = Date.now(); // FIXED: Native epoch milliseconds timestamp (Eliminates p5 runtime freeze)
+        runStartTime = Date.now(); 
         telemetryData = [];
         tableBody.innerHTML = "";
       } else {
@@ -270,7 +270,7 @@
       window.stopAll();
     }
 
-    // Fixed structured alignment format string matching Stick 'Em parsing index positions
+    // Fixed structured alignment format matching Stick 'Em parsing index positions
     window.sendServos = function (m1, m2) {
       const clLeft = (m1 === null || m1 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m1)));
       const clRight = (m2 === null || m2 === undefined) ? '-' : Math.max(1000, Math.min(2000, Math.round(m2)));
@@ -302,6 +302,7 @@
       sendLoopInterval = setInterval(() => {
         if (!connected) return;
 
+        // CRITICAL LOGIC ALIGNMENT FIX: Run calculation sequence cleanly regardless of state
         if (isTrackingActive) {
           if (isLineDetectedInFrame) {
             let baseSpeed = parseInt(document.getElementById('baseSpeed').value);
@@ -315,28 +316,28 @@
             targetLeftPWM  = 1500;
             targetRightPWM = 1500;
           }
-
-          // Accel ramp smoothing calculations applied here
-          let leftDelta = targetLeftPWM - hardwareLeftPWM;
-          if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
-            hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
-          } else {
-            hardwareLeftPWM = targetLeftPWM;
-          }
-
-          let rightDelta = targetRightPWM - hardwareRightPWM;
-          if (Math.abs(rightDelta) > MAX_ACCEL_STEP) {
-            hardwareRightPWM += Math.sign(rightDelta) * MAX_ACCEL_STEP;
-          } else {
-            hardwareRightPWM = targetRightPWM;
-          }
-
-          window.sendServos(hardwareLeftPWM, hardwareRightPWM);
         } else {
-          // FIXED: Clear structural buffers when tracking is paused to prevent memory flooding disconnects
-          pending = null;
-          return;
+          targetLeftPWM  = 1500;
+          targetRightPWM = 1500;
         }
+
+        // Software acceleration dampening engine runs continuously to preserve hardware state
+        let leftDelta = targetLeftPWM - hardwareLeftPWM;
+        if (Math.abs(leftDelta) > MAX_ACCEL_STEP) {
+          hardwareLeftPWM += Math.sign(leftDelta) * MAX_ACCEL_STEP;
+        } else {
+          hardwareLeftPWM = targetLeftPWM;
+        }
+
+        let rightDelta = targetRightPWM - hardwareRightPWM;
+        if (Math.abs(rightDelta) > MAX_ACCEL_STEP) {
+          hardwareRightPWM += Math.sign(rightDelta) * MAX_ACCEL_STEP;
+        } else {
+          hardwareRightPWM = targetRightPWM;
+        }
+
+        // Continually write current structural matrix positions out to command parser string
+        window.sendServos(hardwareLeftPWM, hardwareRightPWM);
 
         if (!pending || pending === lastSent || writing) return;
         sendRaw(pending);
